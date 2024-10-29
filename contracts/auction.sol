@@ -2,11 +2,13 @@
 pragma solidity ^0.8.0;
 
 // 导入Chainlink的KeeperCompatible合约库
-import "@chainlink/contracts/src/v0.8/KeeperCompatible.sol";
+import "@chainlink/contracts/src/v0.8/automation/KeeperCompatible.sol";
 import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"; // 引入AccessControl模块
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+
 
 // 拍卖工厂合约，用于创建和跟踪所有拍卖
 contract AuctionFactory is Initializable, UUPSUpgradeable, AccessControlUpgradeable {
@@ -30,11 +32,24 @@ contract AuctionFactory is Initializable, UUPSUpgradeable, AccessControlUpgradea
         uint _priceDecrement,
         uint _decrementInterval,
         address _depositToken,
-        uint _depositAmount
+        uint _depositAmount,
+        address _nftContract,
+        uint256 _tokenId
     ) public {
+        // 验证客户是否是 NFT 的所有者
+        require(IERC721(_nftContract).ownerOf(_tokenId) == msg.sender, "You are not the owner of this NFT");
+
+        // 创建新的 DutchAuction 合约
         DutchAuction newAuction = new DutchAuction();
-        newAuction.initialize(msg.sender, _startingPrice, _endPrice, _duration, _priceDecrement, _decrementInterval, _depositToken, _depositAmount);
-        auctions.push(address(newAuction)); // 将新拍卖的地址添加到数组中
+
+        // 授权 DutchAuction 合约来转移 NFT
+        IERC721(_nftContract).approve(address(newAuction), _tokenId); // 授权 DutchAuction 合约
+
+        // 初始化拍卖合约
+        newAuction.initialize(msg.sender, _startingPrice, _endPrice, _duration, _priceDecrement, _decrementInterval, _depositToken, _depositAmount, _nftContract, _tokenId);
+        
+        // 将新拍卖的地址添加到数组中
+        auctions.push(address(newAuction));
     }
 
     /*
@@ -85,6 +100,9 @@ contract DutchAuction is KeeperCompatibleInterface, Initializable, UUPSUpgradeab
     uint public depositAmount;       // 每个用户的押金金额
     mapping(address => bool) public hasDeposited; // 记录哪些用户支付了押金
 
+    address public nftContract;
+    uint256 public tokenId;
+
     // 拍卖事件
     event AuctionStarted(uint startPrice, uint endPrice);
     event AuctionEnded(address winner, uint finalPrice);
@@ -100,7 +118,9 @@ contract DutchAuction is KeeperCompatibleInterface, Initializable, UUPSUpgradeab
         uint _priceDecrement,
         uint _decrementInterval,
         address _depositToken,
-        uint _depositAmount
+        uint _depositAmount,
+        address _nftContract,
+        uint256 _tokenId
     ) public initializer {
         __AccessControl_init();
         seller = _seller;
@@ -112,6 +132,8 @@ contract DutchAuction is KeeperCompatibleInterface, Initializable, UUPSUpgradeab
         decrementInterval = _decrementInterval;
         depositToken = IERC20(_depositToken);
         depositAmount = _depositAmount;
+        nftContract = _nftContract;
+        tokenId = _tokenId;
         grantRole(ADMIN_ROLE, msg.sender);
     }
 
@@ -142,6 +164,10 @@ contract DutchAuction is KeeperCompatibleInterface, Initializable, UUPSUpgradeab
         // 从出价者的账户转移出价金额到卖家账户
         require(depositToken.transferFrom(msg.sender, seller, currentPrice), "Token transfer failed.");
 
+        // 从 DutchAuction 转移 NFT 到出价最高的买家
+        IERC721(nftContract).transferFrom(seller, msg.sender, tokenId);
+        // 清除合约对该 NFT 的授权
+        IERC721(nftContract).approve(address(0), tokenId);
         ended = true;
         emit AuctionEnded(msg.sender, currentPrice); // 触发拍卖结束事件
     }
@@ -175,6 +201,8 @@ contract DutchAuction is KeeperCompatibleInterface, Initializable, UUPSUpgradeab
                 currentPrice = currentPrice > priceDecrement ? currentPrice - priceDecrement : endPrice;
             }
         } else if (block.timestamp >= auctionEndTime && !ended) {
+            // 清除合约对该 NFT 的授权
+            IERC721(nftContract).approve(address(0), tokenId);
             ended = true;
             emit AuctionEnded(address(0), 0); // 没有出价人时拍卖结束
         }
